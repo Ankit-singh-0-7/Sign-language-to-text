@@ -172,8 +172,8 @@ if uploaded_file is not None:
             features = process_video(temp_video_path, pose_model, hands_model, max_frames=30)
             
         with st.spinner("Running model prediction..."):
-            model_path = 'isl_model.pth'
-            classes_path = 'classes.json'
+            model_path = 'models/isl_model.pth'
+            classes_path = 'models/classes.json'
             
             if os.path.exists(model_path) and os.path.exists(classes_path):
                 with open(classes_path, 'r') as f:
@@ -193,8 +193,8 @@ if uploaded_file is not None:
                     
                 st.success(f"**Predicted Sign:** {prediction_text}")
             else:
-                st.warning("⚠️ Model file `isl_model.pth` or `classes.json` not found in the directory.")
-                st.info("Since this is a demo, please place the downloaded model and classes.json in the app folder to get actual predictions. Below is a mock output:")
+                st.warning("⚠️ Model file `models/isl_model.pth` or `models/classes.json` not found in the directory.")
+                st.info("Since this is a demo, please place the downloaded model and classes.json in the models folder to get actual predictions. Below is a mock output:")
                 st.success(f"**Predicted Sign (Mock):** hello")
                 
     # Clean up temp file
