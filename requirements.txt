@@ -1,0 +1,5 @@
+streamlit
+torch
+mediapipe
+opencv-python-headless
+numpy
