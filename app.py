@@ -654,153 +654,153 @@ def main():
             st.write("Click below to process landmarks, extract temporal features, and run neural inference:")
             run_btn = st.button("🚀 Analyze & Recognize Sign", use_container_width=True)
 
-            if run_btn:
-                progress_bar = st.progress(0.0)
-                status_text = st.empty()
+        if run_btn:
+            progress_bar = st.progress(0.0)
+            status_text = st.empty()
 
-                status_text.text("Tracking pose and hand 3D landmarks...")
-                raw, keyframe, stats = extract_video_features(
-                    video_source_path,
-                    stride=stride_choice,
-                    max_seconds=max_clip_seconds,
-                    progress_bar=progress_bar,
-                    status_text=status_text
+            status_text.text("Tracking pose and hand 3D landmarks...")
+            raw, keyframe, stats = extract_video_features(
+                video_source_path,
+                stride=stride_choice,
+                max_seconds=max_clip_seconds,
+                progress_bar=progress_bar,
+                status_text=status_text
+            )
+
+            if len(raw) < 10:
+                st.error("Error: Could not extract enough video frames. Please check the video file.")
+                st.stop()
+
+            status_text.text("Segmenting active gesture frames...")
+            hand_present = np.abs(raw[:, 132:]).sum(axis=1) > 0
+            hand_rate = float(hand_present.mean())
+
+            # Same segmentation as preprocessing.py (first to last hand frame),
+            # so the app matches how the model was evaluated.
+            clip = pp.sign_segment(raw)
+
+            if clip is None or len(clip) < 5:
+                st.warning(
+                    f"Hands were barely detected (only {hand_rate:.0%} of frames). "
+                    "Please ensure both hands are clearly visible in the frame with good lighting."
+                )
+                st.stop()
+
+            status_text.text("Running Bidirectional GRU model...")
+            features = pp.build(pp.resample(pp.normalize(clip), 32))
+            t_infer = time.time()
+            raw_probs = model(features[None], training=False).numpy()[0]
+            infer_time = time.time() - t_infer
+
+            # Apply active vocabulary mask
+            active_set = set(active_classes)
+            mask = np.array([1.0 if c in active_set else 0.0 for c in classes], dtype=np.float32)
+            masked_probs = raw_probs * mask
+
+            if masked_probs.sum() == 0:
+                st.error("No active sentences matched the model vocabulary.")
+                st.stop()
+
+            norm_probs = masked_probs / masked_probs.sum()
+            best_idx = int(norm_probs.argmax())
+            best_label = classes[best_idx]
+            best_conf = float(norm_probs[best_idx])
+            raw_best_conf = float(raw_probs[best_idx])
+
+            progress_bar.progress(1.0)
+            status_text.text("Recognition completed!")
+
+            # -------------------------------------------------------------
+            # Display Results Dashboard
+            # -------------------------------------------------------------
+            st.markdown("---")
+            st.markdown("## 📊 Recognition Analysis & Results")
+
+            res_col, metric_col = st.columns([1.3, 1])
+
+            with res_col:
+                conf_class = "conf-high" if best_conf >= 0.65 else ("conf-med" if best_conf >= conf_min else "conf-low")
+                conf_status = "High Confidence" if best_conf >= 0.65 else ("Moderate Confidence" if best_conf >= conf_min else "Low Confidence")
+
+                st.markdown(f"""
+                <div class="result-card">
+                    <div style="font-size:0.9rem; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em; font-weight:600;">
+                        Recognized Sign Sentence
+                    </div>
+                    <div class="result-label">"{best_label}"</div>
+                    <div class="result-conf-badge {conf_class}">
+                        {best_conf*100:.1f}% Match ({conf_status})
+                    </div>
+                    <div style="margin-top:12px; font-size:0.85rem; color:#64748b;">
+                        Raw Model Confidence: {raw_best_conf*100:.1f}% across all {len(classes)} corpus classes
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                st.caption(
+                    "Match % is recalculated over the active sentence list, "
+                    "so it rises when a filter is on. Raw confidence is the model's own score."
                 )
 
-                if len(raw) < 10:
-                    st.error("Error: Could not extract enough video frames. Please check the video file.")
-                    st.stop()
+            with metric_col:
+                m1, m2 = st.columns(2)
+                with m1:
+                    st.markdown(f"""
+                    <div class="metric-pill">
+                        <div class="title">Hand Detection</div>
+                        <div class="val">{hand_rate*100:.0f}%</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with m2:
+                    st.markdown(f"""
+                    <div class="metric-pill">
+                        <div class="title">Sign Frames</div>
+                        <div class="val">{len(clip)}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
 
-                status_text.text("Segmenting active gesture frames...")
-                hand_present = np.abs(raw[:, 132:]).sum(axis=1) > 0
-                hand_rate = float(hand_present.mean())
+                m3, m4 = st.columns(2)
+                with m3:
+                    st.markdown(f"""
+                    <div class="metric-pill">
+                        <div class="title">Total Frames</div>
+                        <div class="val">{stats['frames_extracted']}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with m4:
+                    st.markdown(f"""
+                    <div class="metric-pill">
+                        <div class="title">Inference Time</div>
+                        <div class="val">{infer_time:.2f}s</div>
+                    </div>
+                    """, unsafe_allow_html=True)
 
-                # Same segmentation as preprocessing.py (first to last hand frame),
-                # so the app matches how the model was evaluated.
-                clip = pp.sign_segment(raw)
+                st.caption(f"Landmark extraction took {stats['processing_time']:.1f}s.")
 
-                if clip is None or len(clip) < 5:
-                    st.warning(
-                        f"Hands were barely detected (only {hand_rate:.0%} of frames). "
-                        "Please ensure both hands are clearly visible in the frame with good lighting."
-                    )
-                    st.stop()
+            # Top 5 Predictions Breakdown
+            st.markdown("### 🏆 Top Candidate Sentences")
+            top_indices = norm_probs.argsort()[::-1][:5]
 
-                status_text.text("Running Bidirectional GRU model...")
-                features = pp.build(pp.resample(pp.normalize(clip), 32))
-                t_infer = time.time()
-                raw_probs = model(features[None], training=False).numpy()[0]
-                infer_time = time.time() - t_infer
+            for rank, idx in enumerate(top_indices, start=1):
+                cand_label = classes[idx]
+                cand_prob = float(norm_probs[idx])
+                color_bar = "#10b981" if rank == 1 else "#6366f1"
 
-                # Apply active vocabulary mask
-                active_set = set(active_classes)
-                mask = np.array([1.0 if c in active_set else 0.0 for c in classes], dtype=np.float32)
-                masked_probs = raw_probs * mask
+                st.markdown(f"""
+                <div class="candidate-row">
+                    <div class="candidate-label">
+                        <span><b>#{rank}</b> {cand_label}</span>
+                        <span style="font-family:'JetBrains Mono'; font-weight:700; color:{color_bar};">{cand_prob*100:.1f}%</span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+                st.progress(min(max(cand_prob, 0.0), 1.0))
 
-                if masked_probs.sum() == 0:
-                    st.error("No active sentences matched the model vocabulary.")
-                    st.stop()
-
-                norm_probs = masked_probs / masked_probs.sum()
-                best_idx = int(norm_probs.argmax())
-                best_label = classes[best_idx]
-                best_conf = float(norm_probs[best_idx])
-                raw_best_conf = float(raw_probs[best_idx])
-
-                progress_bar.progress(1.0)
-                status_text.text("Recognition completed!")
-
-                # -------------------------------------------------------------
-                # Display Results Dashboard
-                # -------------------------------------------------------------
+            # Keyframe Landmark Visualization
+            if keyframe is not None:
                 st.markdown("---")
-                st.markdown("## 📊 Recognition Analysis & Results")
-
-                res_col, metric_col = st.columns([1.3, 1])
-
-                with res_col:
-                    conf_class = "conf-high" if best_conf >= 0.65 else ("conf-med" if best_conf >= conf_min else "conf-low")
-                    conf_status = "High Confidence" if best_conf >= 0.65 else ("Moderate Confidence" if best_conf >= conf_min else "Low Confidence")
-
-                    st.markdown(f"""
-                    <div class="result-card">
-                        <div style="font-size:0.9rem; color:#94a3b8; text-transform:uppercase; letter-spacing:0.1em; font-weight:600;">
-                            Recognized Sign Sentence
-                        </div>
-                        <div class="result-label">"{best_label}"</div>
-                        <div class="result-conf-badge {conf_class}">
-                            {best_conf*100:.1f}% Match ({conf_status})
-                        </div>
-                        <div style="margin-top:12px; font-size:0.85rem; color:#64748b;">
-                            Raw Model Confidence: {raw_best_conf*100:.1f}% across all {len(classes)} corpus classes
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    st.caption(
-                        "Match % is recalculated over the active sentence list, "
-                        "so it rises when a filter is on. Raw confidence is the model's own score."
-                    )
-
-                with metric_col:
-                    m1, m2 = st.columns(2)
-                    with m1:
-                        st.markdown(f"""
-                        <div class="metric-pill">
-                            <div class="title">Hand Detection</div>
-                            <div class="val">{hand_rate*100:.0f}%</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    with m2:
-                        st.markdown(f"""
-                        <div class="metric-pill">
-                            <div class="title">Sign Frames</div>
-                            <div class="val">{len(clip)}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-
-                    m3, m4 = st.columns(2)
-                    with m3:
-                        st.markdown(f"""
-                        <div class="metric-pill">
-                            <div class="title">Total Frames</div>
-                            <div class="val">{stats['frames_extracted']}</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                    with m4:
-                        st.markdown(f"""
-                        <div class="metric-pill">
-                            <div class="title">Inference Time</div>
-                            <div class="val">{infer_time:.2f}s</div>
-                        </div>
-                        """, unsafe_allow_html=True)
-
-                    st.caption(f"Landmark extraction took {stats['processing_time']:.1f}s.")
-
-                # Top 5 Predictions Breakdown
-                st.markdown("### 🏆 Top Candidate Sentences")
-                top_indices = norm_probs.argsort()[::-1][:5]
-
-                for rank, idx in enumerate(top_indices, start=1):
-                    cand_label = classes[idx]
-                    cand_prob = float(norm_probs[idx])
-                    color_bar = "#10b981" if rank == 1 else "#6366f1"
-
-                    st.markdown(f"""
-                    <div class="candidate-row">
-                        <div class="candidate-label">
-                            <span><b>#{rank}</b> {cand_label}</span>
-                            <span style="font-family:'JetBrains Mono'; font-weight:700; color:{color_bar};">{cand_prob*100:.1f}%</span>
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                    st.progress(min(max(cand_prob, 0.0), 1.0))
-
-                # Keyframe Landmark Visualization
-                if keyframe is not None:
-                    st.markdown("---")
-                    st.markdown("### 🦾 Landmark Tracking Visualization")
-                    st.caption("MediaPipe real-time 3D joint extraction (Green: Upper Body Pose, Cyan: Left Hand, Magenta: Right Hand):")
-                    st.image(cv2.cvtColor(keyframe, cv2.COLOR_BGR2RGB), use_container_width=True)
+                st.markdown("### 🦾 Landmark Tracking Visualization")
+                st.caption("MediaPipe real-time 3D joint extraction (Green: Upper Body Pose, Cyan: Left Hand, Magenta: Right Hand):")
+                st.image(cv2.cvtColor(keyframe, cv2.COLOR_BGR2RGB), use_container_width=True)
 
     # Dictionary / Vocabulary Browser
     st.markdown("---")
