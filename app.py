@@ -707,7 +707,7 @@ def main():
                         st.markdown(f"""
                         <div class="metric-pill">
                             <div class="title">Active Frames</div>
-                            <div class="val">{len(segs)}</div>
+                            <div class="val">{len(detected_segs)}</div>
                         </div>
                         """, unsafe_allow_html=True)
 
