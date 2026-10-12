@@ -620,17 +620,34 @@ def main():
                 hand_present = np.abs(raw[:, 132:]).sum(axis=1) > 0
                 hand_rate = float(hand_present.mean())
 
-                segs = pp.sign_segment(raw)
+                def find_segments(hand, merge_gap=8, min_len=15):
+                    runs, start = [], None
+                    for i, h in enumerate(hand):
+                        if h and start is None: start = i
+                        if not h and start is not None: runs.append([start, i - 1]); start = None
+                    if start is not None: runs.append([start, len(hand) - 1])
+                    merged = []
+                    for r in runs:
+                        if merged and r[0] - merged[-1][1] <= merge_gap: merged[-1][1] = r[1]
+                        else: merged.append(r)
+                    return [(a, b) for a, b in merged if b - a + 1 >= min_len]
 
-                if segs is None or len(segs) < 5:
+                detected_segs = find_segments(hand_present)
+                if detected_segs:
+                    a, b = max(detected_segs, key=lambda s: s[1] - s[0])
+                    clip = raw[max(a - 3, 0): b + 4]
+                else:
+                    clip = pp.sign_segment(raw)
+
+                if clip is None or len(clip) < 5:
                     st.warning(
                         f"Hands were barely detected (only {hand_rate:.0%} of frames). "
-                        "Please ensure both hands are clearly visible in the frame."
+                        "Please ensure both hands are clearly visible in the frame with good lighting."
                     )
                     st.stop()
 
                 status_text.text("Running Bidirectional GRU model...")
-                features = pp.build(pp.resample(pp.normalize(segs), 32))
+                features = pp.build(pp.resample(pp.normalize(clip), 32))
                 raw_probs = model(features[None], training=False).numpy()[0]
 
                 # Apply active vocabulary mask
