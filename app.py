@@ -1,8 +1,9 @@
 import json
 import os
-import sys
+import re
 import tempfile
 import time
+
 import cv2
 import numpy as np
 import streamlit as st
@@ -214,6 +215,28 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 
 # -----------------------------------------------------------------------------
+# Small helpers
+# -----------------------------------------------------------------------------
+def has_word(text, patterns):
+    """True if any pattern matches as a whole word (or word stem) in the text.
+
+    Patterns are regex fragments, e.g. "help" or r"thank\\w*".
+    Whole-word matching avoids false hits such as "hi" inside "this".
+    """
+    regex = r"\b(?:" + "|".join(patterns) + r")\b"
+    return re.search(regex, text.lower()) is not None
+
+
+def remove_file(path):
+    """Delete a temp file, ignoring errors."""
+    if path:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+# -----------------------------------------------------------------------------
 # Resource Loading & Initialization (Cached)
 # -----------------------------------------------------------------------------
 @st.cache_resource(show_spinner="Loading deep learning model & classes...")
@@ -239,7 +262,11 @@ def load_model_and_classes():
 
 
 def make_landmarkers():
-    """Create fresh MediaPipe Pose and Hand Landmarker instances with reset timestamps."""
+    """Create fresh MediaPipe Pose and Hand Landmarker instances with reset timestamps.
+
+    Tip: commit pose.task and hand.task into the repo's models/ folder so they
+    are not downloaded on every container restart.
+    """
     pose_path = "models/pose.task"
     hand_path = "models/hand.task"
 
@@ -503,26 +530,30 @@ def main():
 
         active_classes = classes.copy()
         if filter_preset == "Common Greetings & Daily":
-            active_classes = [
-                c for c in classes if any(k in c.lower() for k in [
-                    "hi", "hello", "how are you", "good morning", "thank", "welcome",
-                    "nice", "food", "sleep", "care", "beautiful", "happy"
-                ])
+            greeting_patterns = [
+                "hi", "hello", "how are you", "good morning", r"thank\w*", "welcome",
+                "nice", "food", "sleep", r"care\w*", "beautiful", "happy",
             ]
+            active_classes = [c for c in classes if has_word(c, greeting_patterns)]
         elif filter_preset == "Help & Emergency":
-            active_classes = [
-                c for c in classes if any(k in c.lower() for k in [
-                    "help", "water", "worry", "doctor", "crying", "cold", "hurt", "angry", "bad"
-                ])
+            help_patterns = [
+                "help", "water", r"worr\w*", "doctor", r"cry\w*", "cold", "hurt", "angry", "bad",
             ]
+            active_classes = [c for c in classes if has_word(c, help_patterns)]
         elif filter_preset == "Custom Selection":
+            custom_defaults = ["help me", "hi how are you", "congratulations", "you can do it"]
             selected_custom = st.multiselect(
                 "Select Target Sentences",
                 options=sorted(classes, key=str.lower),
-                default=["help me", "hi how are you", "congratulations", "you can do it"]
+                # Only keep defaults that really exist, otherwise Streamlit raises an error.
+                default=[d for d in custom_defaults if d in classes],
             )
             if selected_custom:
                 active_classes = selected_custom
+
+        if not active_classes:
+            st.warning("This filter matched no sentences, so all sentences are being used.")
+            active_classes = classes.copy()
 
         st.info(f"Target Vocabulary: **{len(active_classes)} / {len(classes)}** sentences active.")
 
@@ -553,26 +584,42 @@ def main():
             help="Upper body and both hands should be clearly visible in well-lit conditions."
         )
         if uploaded_file is not None:
-            tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-            tfile.write(uploaded_file.read())
-            video_source_path = tfile.name
+            file_key = f"{uploaded_file.name}-{uploaded_file.size}"
+            # Write the upload to disk only once per file (not on every rerun).
+            if st.session_state.get("upload_key") != file_key:
+                remove_file(st.session_state.get("upload_path"))
+                suffix = os.path.splitext(uploaded_file.name)[1] or ".mp4"
+                with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tfile:
+                    tfile.write(uploaded_file.getbuffer())
+                st.session_state["upload_key"] = file_key
+                st.session_state["upload_path"] = tfile.name
+                st.session_state["active_source"] = "upload"
+        else:
+            remove_file(st.session_state.pop("upload_path", None))
+            st.session_state.pop("upload_key", None)
+            if st.session_state.get("active_source") == "upload":
+                st.session_state["active_source"] = None
 
     with tab_samples:
         st.markdown("Instantly test the model with curated sample sign recordings:")
         sample_dir = "sample_videos"
         sample_files = []
         if os.path.exists(sample_dir):
-            sample_files = [f for f in os.listdir(sample_dir) if f.lower().endswith((".mp4", ".mov", ".avi"))]
+            sample_files = sorted(
+                f for f in os.listdir(sample_dir) if f.lower().endswith((".mp4", ".mov", ".avi"))
+            )
 
         if sample_files:
             cols = st.columns(len(sample_files))
             for i, f in enumerate(sample_files):
                 with cols[i]:
                     st.markdown(f"**{f}**")
-                    full_p = os.path.join(sample_dir, f)
                     if st.button(f"Load Clip {i+1}", key=f"btn_sample_{i}"):
-                        video_source_path = full_p
-                        sample_name = f
+                        # Keep the choice in session_state so it survives the rerun
+                        # triggered by the "Analyze" button.
+                        st.session_state["sample_path"] = os.path.join(sample_dir, f)
+                        st.session_state["sample_name"] = f
+                        st.session_state["active_source"] = "sample"
         else:
             st.info("No sample videos found in sample_videos directory.")
 
@@ -584,6 +631,14 @@ def main():
         3. **Lighting:** Ensure good contrast so MediaPipe can detect fingers clearly without motion blur.
         4. Record a 3–5 second video using your camera app and upload it via the **Upload Sign Video** tab!
         """)
+
+    # Decide which source is active (the most recent choice wins).
+    active_source = st.session_state.get("active_source")
+    if active_source == "upload":
+        video_source_path = st.session_state.get("upload_path")
+    elif active_source == "sample":
+        video_source_path = st.session_state.get("sample_path")
+        sample_name = st.session_state.get("sample_name")
 
     # Video Player Preview & Action Button
     if video_source_path:
@@ -620,24 +675,9 @@ def main():
                 hand_present = np.abs(raw[:, 132:]).sum(axis=1) > 0
                 hand_rate = float(hand_present.mean())
 
-                def find_segments(hand, merge_gap=8, min_len=15):
-                    runs, start = [], None
-                    for i, h in enumerate(hand):
-                        if h and start is None: start = i
-                        if not h and start is not None: runs.append([start, i - 1]); start = None
-                    if start is not None: runs.append([start, len(hand) - 1])
-                    merged = []
-                    for r in runs:
-                        if merged and r[0] - merged[-1][1] <= merge_gap: merged[-1][1] = r[1]
-                        else: merged.append(r)
-                    return [(a, b) for a, b in merged if b - a + 1 >= min_len]
-
-                detected_segs = find_segments(hand_present)
-                if detected_segs:
-                    a, b = max(detected_segs, key=lambda s: s[1] - s[0])
-                    clip = raw[max(a - 3, 0): b + 4]
-                else:
-                    clip = pp.sign_segment(raw)
+                # Same segmentation as preprocessing.py (first to last hand frame),
+                # so the app matches how the model was evaluated.
+                clip = pp.sign_segment(raw)
 
                 if clip is None or len(clip) < 5:
                     st.warning(
@@ -648,10 +688,13 @@ def main():
 
                 status_text.text("Running Bidirectional GRU model...")
                 features = pp.build(pp.resample(pp.normalize(clip), 32))
+                t_infer = time.time()
                 raw_probs = model(features[None], training=False).numpy()[0]
+                infer_time = time.time() - t_infer
 
                 # Apply active vocabulary mask
-                mask = np.array([1.0 if c in active_classes else 0.0 for c in classes], dtype=np.float32)
+                active_set = set(active_classes)
+                mask = np.array([1.0 if c in active_set else 0.0 for c in classes], dtype=np.float32)
                 masked_probs = raw_probs * mask
 
                 if masked_probs.sum() == 0:
@@ -689,10 +732,14 @@ def main():
                             {best_conf*100:.1f}% Match ({conf_status})
                         </div>
                         <div style="margin-top:12px; font-size:0.85rem; color:#64748b;">
-                            Raw Model Confidence: {raw_best_conf*100:.1f}% across all 101 corpus classes
+                            Raw Model Confidence: {raw_best_conf*100:.1f}% across all {len(classes)} corpus classes
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
+                    st.caption(
+                        "Match % is recalculated over the active sentence list, "
+                        "so it rises when a filter is on. Raw confidence is the model's own score."
+                    )
 
                 with metric_col:
                     m1, m2 = st.columns(2)
@@ -706,8 +753,8 @@ def main():
                     with m2:
                         st.markdown(f"""
                         <div class="metric-pill">
-                            <div class="title">Active Frames</div>
-                            <div class="val">{len(detected_segs)}</div>
+                            <div class="title">Sign Frames</div>
+                            <div class="val">{len(clip)}</div>
                         </div>
                         """, unsafe_allow_html=True)
 
@@ -723,9 +770,11 @@ def main():
                         st.markdown(f"""
                         <div class="metric-pill">
                             <div class="title">Inference Time</div>
-                            <div class="val">{stats['processing_time']:.2f}s</div>
+                            <div class="val">{infer_time:.2f}s</div>
                         </div>
                         """, unsafe_allow_html=True)
+
+                    st.caption(f"Landmark extraction took {stats['processing_time']:.1f}s.")
 
                 # Top 5 Predictions Breakdown
                 st.markdown("### 🏆 Top Candidate Sentences")
@@ -744,7 +793,7 @@ def main():
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
-                    st.progress(cand_prob)
+                    st.progress(min(max(cand_prob, 0.0), 1.0))
 
                 # Keyframe Landmark Visualization
                 if keyframe is not None:
@@ -755,7 +804,7 @@ def main():
 
     # Dictionary / Vocabulary Browser
     st.markdown("---")
-    with st.expander("📚 Explore Complete Vocabulary of 101 ISL Sentences"):
+    with st.expander(f"📚 Explore Complete Vocabulary of {len(classes)} ISL Sentences"):
         search_query = st.text_input("🔍 Search sentence vocabulary...", placeholder="e.g. help, train, happy, sleep")
         filtered_voc = [c for c in classes if search_query.lower() in c.lower()] if search_query else classes
 
