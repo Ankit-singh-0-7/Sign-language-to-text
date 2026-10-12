@@ -1,7 +1,6 @@
-streamlit
-tensorflow>=2.15.0
-mediapipe>=0.10.14
-opencv-python-headless>=4.8.0
-numpy>=1.23.5,<2.0.0
-protobuf>=4.21.2,<5.0.0
-huggingface_hub
+streamlit==1.40.2
+tensorflow-cpu==2.17.1
+mediapipe==0.10.21
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+protobuf==4.25.5
