@@ -238,9 +238,8 @@ def load_model_and_classes():
     return model, classes
 
 
-@st.cache_resource(show_spinner="Initializing MediaPipe computer vision tasks...")
-def init_landmarkers():
-    """Initialize MediaPipe Pose and Hand Landmarker vision models."""
+def make_landmarkers():
+    """Create fresh MediaPipe Pose and Hand Landmarker instances with reset timestamps."""
     pose_path = "models/pose.task"
     hand_path = "models/hand.task"
 
@@ -364,51 +363,61 @@ def extract_video_features(video_path, stride=2, max_seconds=12, progress_bar=No
     total_file_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     max_frames = int(max_seconds * fps)
 
-    pose, hands = init_landmarkers()
+    pose, hands = make_landmarkers()
 
     seq = []
     frame_idx = 0
     annotated_keyframe = None
     max_hand_dist = 0.0
+    last_timestamp_ms = -1
 
     t_start = time.time()
 
-    while frame_idx < max_frames:
-        ok, frame = cap.read()
-        if not ok:
-            break
+    try:
+        while frame_idx < max_frames:
+            ok, frame = cap.read()
+            if not ok:
+                break
 
-        if frame_idx % stride == 0:
-            h, w = frame.shape[:2]
-            target_w = 640
-            frame_resized = cv2.resize(frame, (target_w, int(h * target_w / w)))
+            if frame_idx % stride == 0:
+                h, w = frame.shape[:2]
+                target_w = 640
+                frame_resized = cv2.resize(frame, (target_w, int(h * target_w / w)))
 
-            img = mp.Image(
-                image_format=mp.ImageFormat.SRGB,
-                data=np.ascontiguousarray(cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB))
-            )
-            timestamp_ms = int(frame_idx * 1000 / fps)
+                img = mp.Image(
+                    image_format=mp.ImageFormat.SRGB,
+                    data=np.ascontiguousarray(cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB))
+                )
+                computed_ts = int(frame_idx * 1000 / fps)
+                timestamp_ms = max(computed_ts, last_timestamp_ms + 1)
+                last_timestamp_ms = timestamp_ms
 
-            pr = pose.detect_for_video(img, timestamp_ms)
-            hr = hands.detect_for_video(img, timestamp_ms)
+                pr = pose.detect_for_video(img, timestamp_ms)
+                hr = hands.detect_for_video(img, timestamp_ms)
 
-            feats = frame_features(pr, hr)
-            seq.append(feats)
+                feats = frame_features(pr, hr)
+                seq.append(feats)
 
-            # Detect keyframe with highest hand presence
-            hand_mag = np.abs(feats[132:]).sum()
-            if hand_mag > max_hand_dist:
-                max_hand_dist = hand_mag
-                annotated_keyframe = draw_skeleton(frame_resized, pr, hr)
+                # Detect keyframe with highest hand presence
+                hand_mag = np.abs(feats[132:]).sum()
+                if hand_mag > max_hand_dist:
+                    max_hand_dist = hand_mag
+                    annotated_keyframe = draw_skeleton(frame_resized, pr, hr)
 
-        frame_idx += 1
-        if progress_bar and total_file_frames > 0:
-            pct = min(frame_idx / min(total_file_frames, max_frames), 1.0)
-            progress_bar.progress(pct)
-            if status_text and frame_idx % 10 == 0:
-                status_text.text(f"Processed frame {frame_idx} of {min(total_file_frames, max_frames)}...")
+            frame_idx += 1
+            if progress_bar and total_file_frames > 0:
+                pct = min(frame_idx / min(total_file_frames, max_frames), 1.0)
+                progress_bar.progress(pct)
+                if status_text and frame_idx % 10 == 0:
+                    status_text.text(f"Processed frame {frame_idx} of {min(total_file_frames, max_frames)}...")
+    finally:
+        cap.release()
+        try:
+            pose.close()
+            hands.close()
+        except Exception:
+            pass
 
-    cap.release()
     total_time = time.time() - t_start
 
     raw = np.array(seq, dtype=np.float32) if len(seq) > 0 else np.zeros((0, 258), dtype=np.float32)
